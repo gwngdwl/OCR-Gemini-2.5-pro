@@ -1,0 +1,197 @@
+name: Process Uploaded PDF
+
+on:
+  workflow_dispatch:
+    inputs:
+      pdf_filename:
+        description: 'שם קובץ ה-PDF (צריך להיות ב-repository)'
+        required: true
+        type: string
+        default: 'input.pdf'
+      pages_per_chunk:
+        description: 'כמה עמודים בכל chunk'
+        required: false
+        default: '5'
+        type: string
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install google-genai PyPDF2 httpx
+    
+    - name: Check PDF exists
+      run: |
+        if [ ! -f "${{ github.event.inputs.pdf_filename }}" ]; then
+          echo "שגיאה: הקובץ ${{ github.event.inputs.pdf_filename }} לא נמצא!"
+          echo "העלה את הקובץ ל-repository לפני הרצת ה-workflow"
+          exit 1
+        fi
+        echo "נמצא קובץ: ${{ github.event.inputs.pdf_filename }}"
+        echo "גודל: $(du -h ${{ github.event.inputs.pdf_filename }} | cut -f1)"
+    
+    - name: Create processing script
+      run: |
+        cat > process.py << 'EOF'
+        import os
+        import ssl
+        import warnings
+        import io
+        import time
+        from PyPDF2 import PdfReader, PdfWriter
+        
+        # עקיפת בדיקת SSL
+        ssl._create_default_https_context = ssl._create_unverified_context
+        
+        # Monkey patch ל-httpx
+        import httpx
+        _original_httpx_client_init = httpx.Client.__init__
+        
+        def _patched_httpx_client_init(self, *args, **kwargs):
+            kwargs['verify'] = False
+            warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+            _original_httpx_client_init(self, *args, **kwargs)
+        
+        httpx.Client.__init__ = _patched_httpx_client_init
+        
+        from google import genai
+        from google.genai import types
+        
+        # הגדרות
+        API_KEY = os.environ.get('GEMINI_API_KEY')
+        if not API_KEY:
+            print("שגיאה: GEMINI_API_KEY לא מוגדר!")
+            print("הוסף את ה-API key ב-Settings → Secrets and variables → Actions")
+            print("צור Secret בשם: GEMINI_API_KEY")
+            exit(1)
+        
+        SOURCE_PDF = os.environ.get('PDF_FILENAME', 'input.pdf')
+        OUTPUT_TXT = "output.txt"
+        PAGES_PER_CHUNK = int(os.environ.get('PAGES_PER_CHUNK', '5'))
+        
+        print(f"קורא את הקובץ: {SOURCE_PDF}")
+        reader = PdfReader(SOURCE_PDF)
+        total_pages = len(reader.pages)
+        print(f"הקובץ מכיל {total_pages} עמודים")
+        print(f"יעבד ב-chunks של {PAGES_PER_CHUNK} עמודים\n")
+        
+        print("מתחבר ל-Gemini...")
+        client = genai.Client(api_key=API_KEY)
+        
+        all_text = []
+        
+        # עיבוד בחלקים - אחד אחרי השני
+        for start_page in range(0, total_pages, PAGES_PER_CHUNK):
+            end_page = min(start_page + PAGES_PER_CHUNK, total_pages)
+            chunk_num = (start_page // PAGES_PER_CHUNK) + 1
+            total_chunks = (total_pages + PAGES_PER_CHUNK - 1) // PAGES_PER_CHUNK
+            
+            print(f"\n{'='*60}")
+            print(f"מעבד chunk {chunk_num}/{total_chunks}: עמודים {start_page + 1}-{end_page}")
+            print(f"{'='*60}")
+            
+            # יצירת PDF זמני עם החלק הנוכחי
+            writer = PdfWriter()
+            for i in range(start_page, end_page):
+                writer.add_page(reader.pages[i])
+            
+            temp_pdf = f"temp_chunk_{start_page + 1}_{end_page}.pdf"
+            with open(temp_pdf, "wb") as f:
+                writer.write(f)
+            
+            print(f"מעלה chunk ל-Gemini...")
+            with open(temp_pdf, "rb") as f:
+                pdf_bytes = f.read()
+            
+            file_obj = io.BytesIO(pdf_bytes)
+            uploaded = client.files.upload(
+                file=file_obj,
+                config=types.UploadFileConfig(mime_type="application/pdf")
+            )
+            
+            print("שולח לעיבוד...")
+            prompt = """לפניך מסמך PDF. 
+        כתוב לי את תוכן המסמך במדוייק, אל תוסיף כלום מדעתך.
+        
+        חשוב:
+        - אל תכלול כותרות עליונות (headers)
+        - אל תכלול הערות שוליים (footnotes)
+        - רק את תוכן הטקסט הראשי של המסמך
+        - הקובץ הוא שני טורים! קרא את הטור הימני ולאחר מכן את הטור השמאלי"""
+            
+            contents = [
+                types.Part.from_uri(file_uri=uploaded.uri, mime_type="application/pdf"),
+                types.Part.from_text(text=prompt)
+            ]
+            
+            response = client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=None,
+                    response_mime_type='text/plain',
+                    temperature=0.8
+                )
+            )
+            
+            chunk_text = response.text.strip() if response.text else ""
+            all_text.append(chunk_text)
+            
+            print(f"התקבלו {len(chunk_text)} תווים")
+            
+            # שמירה חלקית (backup)
+            with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
+                f.write("\n\n".join(all_text))
+            
+            print(f"נשמר עד כה ב-{OUTPUT_TXT}")
+            
+            # המתנה של 5 שניות בין chunks (flash מהיר יותר)
+            if chunk_num < total_chunks:
+                print("ממתין 5 שניות לפני chunk הבא...")
+                time.sleep(5)
+        
+        print(f"\n{'='*60}")
+        print("הושלם!")
+        print(f"{'='*60}")
+        print(f"סה\"כ עובדו {total_pages} עמודים")
+        print(f"סה\"כ {len(all_text)} chunks")
+        print(f"הטקסט המלא נשמר ב-{OUTPUT_TXT}")
+        EOF
+    
+    - name: Process PDF
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        PAGES_PER_CHUNK: ${{ github.event.inputs.pages_per_chunk }}
+        PDF_FILENAME: ${{ github.event.inputs.pdf_filename }}
+      run: |
+        python process.py
+    
+    - name: Upload result
+      uses: actions/upload-artifact@v4
+      with:
+        name: processed-text
+        path: output.txt
+        retention-days: 30
+    
+    - name: Create summary
+      run: |
+        echo "## תוצאות עיבוד PDF" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**קובץ מקור:** ${{ github.event.inputs.pdf_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**גודל קובץ פלט:** $(du -h output.txt | cut -f1)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**מספר תווים:** $(wc -c < output.txt)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "הקובץ המעובד זמין ב-Artifacts למעלה ⬆️" >> $GITHUB_STEP_SUMMARY
