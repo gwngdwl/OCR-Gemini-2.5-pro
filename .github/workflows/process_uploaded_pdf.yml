@@ -201,11 +201,13 @@ jobs:
         python process.py
     
     - name: Upload result
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: processed-text-${{ github.event.inputs.model }}
         path: output.txt
         retention-days: 30
+        if-no-files-found: warn
     
     - name: Create summary
       run: |
@@ -219,3 +221,4 @@ jobs:
         echo "**מספר תווים:** $(wc -c < output.txt)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "הקובץ המעובד זמין ב-Artifacts למעלה ⬆️" >> $GITHUB_STEP_SUMMARY
+
