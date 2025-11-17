@@ -32,7 +32,7 @@ jobs:
     
     - name: Download PDF
       run: |
-        wget -O input.pdf "${{ github.event.inputs.pdf_url }}"
+        wget --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -O input.pdf "${{ github.event.inputs.pdf_url }}"
         echo "הורד קובץ PDF בגודל: $(du -h input.pdf | cut -f1)"
     
     - name: Create processing script
