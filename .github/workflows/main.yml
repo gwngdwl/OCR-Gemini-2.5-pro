@@ -43,7 +43,6 @@ jobs:
         import warnings
         import io
         import time
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         from PyPDF2 import PdfReader, PdfWriter
         
         # עקיפת בדיקת SSL
@@ -78,15 +77,19 @@ jobs:
         print("מתחבר ל-Gemini...")
         client = genai.Client(api_key=API_KEY)
         
-        # הכנת כל ה-chunks מראש
-        total_chunks = (total_pages + PAGES_PER_CHUNK - 1) // PAGES_PER_CHUNK
-        chunks_info = []
+        all_text = []
         
-        print("מכין chunks...")
+        # עיבוד בחלקים - אחד אחרי השני
         for start_page in range(0, total_pages, PAGES_PER_CHUNK):
             end_page = min(start_page + PAGES_PER_CHUNK, total_pages)
             chunk_num = (start_page // PAGES_PER_CHUNK) + 1
+            total_chunks = (total_pages + PAGES_PER_CHUNK - 1) // PAGES_PER_CHUNK
             
+            print(f"\n{'='*60}")
+            print(f"מעבד chunk {chunk_num}/{total_chunks}: עמודים {start_page + 1}-{end_page}")
+            print(f"{'='*60}")
+            
+            # יצירת PDF זמני עם החלק הנוכחי
             writer = PdfWriter()
             for i in range(start_page, end_page):
                 writer.add_page(reader.pages[i])
@@ -95,23 +98,7 @@ jobs:
             with open(temp_pdf, "wb") as f:
                 writer.write(f)
             
-            chunks_info.append({
-                'chunk_num': chunk_num,
-                'start_page': start_page + 1,
-                'end_page': end_page,
-                'temp_pdf': temp_pdf
-            })
-        
-        print(f"נוצרו {len(chunks_info)} chunks\n")
-        
-        def process_chunk(chunk_info):
-            chunk_num = chunk_info['chunk_num']
-            start_page = chunk_info['start_page']
-            end_page = chunk_info['end_page']
-            temp_pdf = chunk_info['temp_pdf']
-            
-            print(f"[Chunk {chunk_num}/{total_chunks}] מעלה עמודים {start_page}-{end_page}...")
-            
+            print(f"מעלה chunk ל-Gemini...")
             with open(temp_pdf, "rb") as f:
                 pdf_bytes = f.read()
             
@@ -121,8 +108,7 @@ jobs:
                 config=types.UploadFileConfig(mime_type="application/pdf")
             )
             
-            print(f"[Chunk {chunk_num}/{total_chunks}] שולח לעיבוד...")
-            
+            print("שולח לעיבוד...")
             prompt = """לפניך מסמך PDF. 
         כתוב לי את תוכן המסמך במדוייק, אל תוסיף כלום מדעתך.
         
@@ -148,43 +134,26 @@ jobs:
             )
             
             chunk_text = response.text.strip() if response.text else ""
-            print(f"[Chunk {chunk_num}/{total_chunks}] הושלם! התקבלו {len(chunk_text)} תווים")
+            all_text.append(chunk_text)
             
-            return {
-                'chunk_num': chunk_num,
-                'text': chunk_text
-            }
-        
-        print("מתחיל עיבוד מקביל (2 chunks במקביל)...\n")
-        results = {}
-        
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_chunk = {executor.submit(process_chunk, chunk): chunk for chunk in chunks_info}
+            print(f"התקבלו {len(chunk_text)} תווים")
             
-            for future in as_completed(future_to_chunk):
-                try:
-                    result = future.result()
-                    results[result['chunk_num']] = result['text']
-                    
-                    all_text = [results[i] for i in sorted(results.keys())]
-                    with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
-                        f.write("\n\n".join(all_text))
-                    
-                    print(f"נשמרו {len(results)}/{total_chunks} chunks עד כה\n")
-                    
-                except Exception as e:
-                    chunk = future_to_chunk[future]
-                    print(f"שגיאה ב-chunk {chunk['chunk_num']}: {e}\n")
-        
-        all_text = [results[i] for i in sorted(results.keys())]
-        with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
-            f.write("\n\n".join(all_text))
+            # שמירה חלקית (backup)
+            with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
+                f.write("\n\n".join(all_text))
+            
+            print(f"נשמר עד כה ב-{OUTPUT_TXT}")
+            
+            # המתנה של 30 שניות בין chunks כדי לא לעבור מגבלות
+            if chunk_num < total_chunks:
+                print("ממתין 30 שניות לפני chunk הבא...")
+                time.sleep(30)
         
         print(f"\n{'='*60}")
         print("הושלם!")
         print(f"{'='*60}")
         print(f"סה\"כ עובדו {total_pages} עמודים")
-        print(f"סה\"כ {len(results)} chunks")
+        print(f"סה\"כ {len(all_text)} chunks")
         print(f"הטקסט המלא נשמר ב-{OUTPUT_TXT}")
         EOF
     
