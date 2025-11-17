@@ -8,6 +8,16 @@ on:
         required: true
         type: string
         default: 'input.pdf'
+      model:
+        description: 'בחר מודל'
+        required: true
+        type: choice
+        options:
+          - 'gemini-2.5-flash-lite'
+          - 'gemini-2.5-flash-preview'
+          - 'gemini-2.5-flash'
+          - 'gemini-2.5-pro'
+        default: 'gemini-2.5-pro'
       pages_per_chunk:
         description: 'כמה עמודים בכל chunk'
         required: false
@@ -76,9 +86,12 @@ jobs:
             print("צור Secret בשם: GEMINI_API_KEY")
             exit(1)
         
+        MODEL_NAME = os.environ.get('MODEL_NAME', 'gemini-2.5-flash-lite')
         SOURCE_PDF = os.environ.get('PDF_FILENAME', 'input.pdf')
         OUTPUT_TXT = "output.txt"
         PAGES_PER_CHUNK = int(os.environ.get('PAGES_PER_CHUNK', '5'))
+        
+        print(f"מודל: {MODEL_NAME}")
         
         print(f"קורא את הקובץ: {SOURCE_PDF}")
         reader = PdfReader(SOURCE_PDF)
@@ -136,7 +149,7 @@ jobs:
             ]
             
             response = client.models.generate_content(
-                model="gemini-2.5-pro",
+                model=MODEL_NAME,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=None,
@@ -156,10 +169,19 @@ jobs:
             
             print(f"נשמר עד כה ב-{OUTPUT_TXT}")
             
-            # המתנה של 5 שניות בין chunks (flash מהיר יותר)
+            # המתנה בין chunks לפי המודל
             if chunk_num < total_chunks:
-                print("ממתין 5 שניות לפני chunk הבא...")
-                time.sleep(5)
+                if 'lite' in MODEL_NAME:
+                    wait_time = 1  # Flash-Lite: 4000 RPM - כמעט ללא המתנה
+                elif 'preview' in MODEL_NAME:
+                    wait_time = 4  # Flash Preview: 1000 RPM - 4 שניות
+                elif 'pro' in MODEL_NAME:
+                    wait_time = 40  # Pro: 150 RPM - 40 שניות
+                else:
+                    wait_time = 5
+                
+                print(f"ממתין {wait_time} שניות לפני chunk הבא...")
+                time.sleep(wait_time)
         
         print(f"\n{'='*60}")
         print("הושלם!")
@@ -174,13 +196,14 @@ jobs:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         PAGES_PER_CHUNK: ${{ github.event.inputs.pages_per_chunk }}
         PDF_FILENAME: ${{ github.event.inputs.pdf_filename }}
+        MODEL_NAME: ${{ github.event.inputs.model }}
       run: |
         python process.py
     
     - name: Upload result
       uses: actions/upload-artifact@v4
       with:
-        name: processed-text
+        name: processed-text-${{ github.event.inputs.model }}
         path: output.txt
         retention-days: 30
     
@@ -189,10 +212,10 @@ jobs:
         echo "## תוצאות עיבוד PDF" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**קובץ מקור:** ${{ github.event.inputs.pdf_filename }}" >> $GITHUB_STEP_SUMMARY
+        echo "**מודל:** ${{ github.event.inputs.model }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**גודל קובץ פלט:** $(du -h output.txt | cut -f1)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**מספר תווים:** $(wc -c < output.txt)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "הקובץ המעובד זמין ב-Artifacts למעלה ⬆️" >> $GITHUB_STEP_SUMMARY
-
